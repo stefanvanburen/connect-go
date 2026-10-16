@@ -848,6 +848,12 @@ func (hc *connectStreamingHandlerConn) Send(msg any) error {
 	return nil // must be a literal nil: nil *connect.Error is a non-nil error
 }
 
+// SendHeaders writes the response headers without a message.
+func (hc *connectStreamingHandlerConn) SendHeaders() error {
+	flushResponseWriter(hc.responseWriter)
+	return nil
+}
+
 func (hc *connectStreamingHandlerConn) ResponseHeader() http.Header {
 	return hc.responseWriter.Header()
 }

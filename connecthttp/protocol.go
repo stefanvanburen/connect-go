@@ -190,6 +190,13 @@ func (hc *errorTranslatingHandlerConnCloser) Close(err error) error {
 	return hc.fromWire(closeErr)
 }
 
+func (hc *errorTranslatingHandlerConnCloser) SendHeaders() error {
+	if sender, ok := hc.handlerConnCloser.(headerSender); ok {
+		return hc.fromWire(sender.SendHeaders())
+	}
+	return nil
+}
+
 func (hc *errorTranslatingHandlerConnCloser) getHTTPMethod() string {
 	if methoder, ok := hc.handlerConnCloser.(interface{ getHTTPMethod() string }); ok {
 		return methoder.getHTTPMethod()

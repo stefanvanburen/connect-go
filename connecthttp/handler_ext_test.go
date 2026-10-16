@@ -20,11 +20,13 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect/v2"
 	"connectrpc.com/connect/v2/connecthttp"
@@ -493,4 +495,69 @@ type successPingServer struct {
 
 func (successPingServer) Ping(context.Context, *pingv1.PingRequest) (*pingv1.PingResponse, error) {
 	return &pingv1.PingResponse{}, nil
+}
+
+// TestServerStreamSendHeaders verifies that a server-streaming handler's
+// SendHeaders delivers the response headers before the first message, and
+// that an error returned afterward still reaches the client.
+func TestServerStreamSendHeaders(t *testing.T) {
+	t.Parallel()
+	spec := connect.Spec{
+		Procedure:  pingv1connect.PingServiceCountUpProcedure,
+		StreamType: connect.StreamTypeServer,
+	}
+	for _, protocol := range []struct {
+		name string
+		opts []connecthttp.Option
+	}{
+		{"connect", nil},
+		{"grpc", []connecthttp.Option{connecthttp.WithGRPC()}},
+		{"grpcweb", []connecthttp.Option{connecthttp.WithGRPCWeb()}},
+	} {
+		for _, withHeader := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s/header=%t", protocol.name, withHeader), func(t *testing.T) {
+				t.Parallel()
+				release := make(chan struct{})
+				srv := connect.NewServer()
+				srv.Register(connect.Method{Spec: spec, Handler: func(ctx context.Context, _ connect.Spec, stream connect.ServerStream) error {
+					if err := stream.Receive(&pingv1.CountUpRequest{}); err != nil {
+						return err
+					}
+					if withHeader {
+						info, _ := connect.CallInfoForServerContext(ctx)
+						info.ResponseHeader().Set("X-Early", "yes")
+					}
+					if err := stream.SendHeaders(); err != nil {
+						return err
+					}
+					select {
+					case <-release:
+					case <-ctx.Done():
+					}
+					return connect.NewError(connect.CodeAborted, "done")
+				}})
+				mux := http.NewServeMux()
+				connecthttp.Mount(mux, srv)
+				server := memhttptest.NewServer(t, mux)
+				client := connect.NewClient(connecthttp.NewTransport(server.Client(), server.URL(), protocol.opts...))
+
+				// The handler holds its response until release closes, so the
+				// call only returns if SendHeaders reached the client.
+				ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+				defer cancel()
+				ctx, info := connect.NewClientContext(ctx)
+				stream, err := client.CallServerStream(ctx, spec, &pingv1.CountUpRequest{Number: 1})
+				if err != nil {
+					t.Fatalf("CallServerStream: %v", err)
+				}
+				defer stream.Close()
+				close(release)
+				err = stream.Receive(&pingv1.CountUpResponse{})
+				assert.Equal(t, connect.CodeOf(err), connect.CodeAborted)
+				if withHeader {
+					assert.Equal(t, info.ResponseHeader().Get("X-Early"), "yes")
+				}
+			})
+		}
+	}
 }

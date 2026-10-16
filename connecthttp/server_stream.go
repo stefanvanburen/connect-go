@@ -76,7 +76,23 @@ func (s *handlerStream) Receive(dst any) error {
 	return nil
 }
 
-func (s *handlerStream) SendHeaders() error { return nil }
+// headerSender is implemented by streaming handler conns that can write
+// response headers before the first message.
+type headerSender interface {
+	SendHeaders() error
+}
+
+// SendHeaders writes the response headers for streaming RPCs. Unary
+// responses send their headers with the single message, so it's a no-op for
+// them.
+func (s *handlerStream) SendHeaders() error {
+	sender, ok := s.conn.(headerSender)
+	if s.unary || !ok {
+		return nil
+	}
+	s.flushHeader()
+	return sender.SendHeaders()
+}
 
 func (s *handlerStream) Send(msg any) error {
 	s.flushHeader()

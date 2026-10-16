@@ -535,6 +535,17 @@ func (hc *grpcHandlerConn) Send(msg any) error {
 	return nil // must be a literal nil: nil *connect.Error is a non-nil error
 }
 
+// SendHeaders writes the response headers without a message. A response
+// whose headers are sent can't be trailers-only.
+func (hc *grpcHandlerConn) SendHeaders() error {
+	if !hc.wroteToBody {
+		mergeHeaders(hc.responseWriter.Header(), hc.responseHeader)
+		hc.wroteToBody = true
+	}
+	flushResponseWriter(hc.responseWriter)
+	return nil
+}
+
 func (hc *grpcHandlerConn) ResponseHeader() http.Header {
 	return hc.responseHeader
 }
