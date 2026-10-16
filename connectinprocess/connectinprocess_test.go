@@ -836,3 +836,70 @@ func TestCallInfoSpec(t *testing.T) {
 		t.Errorf("server Spec.Procedure = %q, want %q", got, want)
 	}
 }
+
+// TestServerStreamRejectedBeforeReceive verifies that a server-streaming
+// caller sees the server's error, not io.EOF, when the server rejects the call
+// before reading the request.
+func TestServerStreamRejectedBeforeReceive(t *testing.T) {
+	t.Parallel()
+	reject := func(connect.ServerFunc) connect.ServerFunc {
+		return func(context.Context, connect.Spec, connect.ServerStream) error {
+			return connect.NewError(connect.CodeUnauthenticated, "no token")
+		}
+	}
+	handler := connect.NewServer(reject)
+	pingv1connect.RegisterPingServiceHandler(handler, pingServer{})
+	client := pingv1connect.NewPingServiceClient(connect.NewClient(connectinprocess.New(handler)))
+
+	stream, err := client.CountUp(t.Context(), &pingv1.CountUpRequest{Number: 1})
+	if err != nil {
+		t.Fatalf("CountUp: %v", err)
+	}
+	defer stream.Close()
+	_, err = stream.Receive()
+	if code := connect.CodeOf(err); code != connect.CodeUnauthenticated {
+		t.Errorf("Receive: got %v (%v), want unauthenticated", code, err)
+	}
+}
+
+// TestServerStreamSendErrorCloses verifies that CallServerStream closes the
+// stream when Send fails, so interceptors watching Close see the RPC end.
+func TestServerStreamSendErrorCloses(t *testing.T) {
+	t.Parallel()
+	handler := connect.NewServer()
+	pingv1connect.RegisterPingServiceHandler(handler, pingServer{})
+	sendErr := errors.New("send failed")
+	var closed bool
+	failSend := func(next connect.ClientFunc) connect.ClientFunc {
+		return func(ctx context.Context, spec connect.Spec) (connect.ClientStream, error) {
+			stream, err := next(ctx, spec)
+			if err != nil {
+				return nil, err
+			}
+			return &failSendStream{ClientStream: stream, err: sendErr, closed: &closed}, nil
+		}
+	}
+	client := pingv1connect.NewPingServiceClient(connect.NewClient(connectinprocess.New(handler), failSend))
+
+	_, err := client.CountUp(t.Context(), &pingv1.CountUpRequest{Number: 1})
+	if !errors.Is(err, sendErr) {
+		t.Errorf("CountUp: got %v, want %v", err, sendErr)
+	}
+	if !closed {
+		t.Error("stream not closed after Send failed")
+	}
+}
+
+type failSendStream struct {
+	connect.ClientStream
+
+	err    error
+	closed *bool
+}
+
+func (s *failSendStream) Send(any) error { return s.err }
+
+func (s *failSendStream) Close() error {
+	*s.closed = true
+	return s.ClientStream.Close()
+}
