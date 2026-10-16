@@ -45,6 +45,10 @@ func (h *handler) ServeHTTP(responseWriter http.ResponseWriter, request *http.Re
 	// EOF: the stream we construct later on already does that, and we only
 	// return early when dealing with misbehaving clients. In those cases, it's
 	// okay if we can't re-use the connection.
+	// Over HTTP/1.1, net/http otherwise reads up to 256 KiB of an unread
+	// request body before writing the response, so a handler that rejects a
+	// request early would wait on a client still holding the body open.
+	_ = http.NewResponseController(responseWriter).EnableFullDuplex()
 	isBidi := (h.spec.StreamType & connect.StreamTypeBidi) == connect.StreamTypeBidi
 	if isBidi && request.ProtoMajor < 2 {
 		// Clients coded to expect full-duplex connections may hang if they've
