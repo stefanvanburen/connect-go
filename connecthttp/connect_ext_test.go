@@ -4487,3 +4487,54 @@ func assertErrorResponseMetadata(t *testing.T, callInfo *connect.CallInfo) { //n
 	assert.True(t, compareValues(header, expectedHeaderValues))
 	assert.True(t, compareValues(callInfo.ResponseTrailer().Values(handlerTrailer), expectedHeaderValues))
 }
+
+// TestHandlerEarlyRejectIdleBodyHTTP1 verifies that over HTTP/1.1, a handler
+// that rejects a request before reading it responds while the client still
+// holds the request body open.
+func TestHandlerEarlyRejectIdleBodyHTTP1(t *testing.T) {
+	t.Parallel()
+	reject := func(connect.ServerFunc) connect.ServerFunc {
+		return func(context.Context, connect.Spec, connect.ServerStream) error {
+			return connect.NewError(connect.CodeUnauthenticated, "no token")
+		}
+	}
+	server := connect.NewServer(reject)
+	pingv1connect.RegisterPingServiceHandler(server, pingServer{})
+	mux := http.NewServeMux()
+	connecthttp.Mount(mux, server)
+	httpServer := memhttptest.NewServer(t, mux)
+	client := &http.Client{Transport: httpServer.TransportHTTP1()}
+
+	for _, testCase := range []struct {
+		name        string
+		procedure   string
+		contentType string
+		wantStatus  int
+	}{
+		{"connect_unary", pingv1connect.PingServicePingProcedure, "application/proto", http.StatusUnauthorized},
+		{"connect_server_stream", pingv1connect.PingServiceCountUpProcedure, "application/connect+proto", http.StatusOK},
+		{"grpcweb_server_stream", pingv1connect.PingServiceCountUpProcedure, "application/grpc-web+proto", http.StatusOK},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+			defer cancel()
+			bodyReader, bodyWriter := io.Pipe()
+			// The HTTP/1.1 transport waits for the body to finish before
+			// returning a canceled request, so end it with the context.
+			context.AfterFunc(ctx, func() { _ = bodyWriter.Close() })
+			go func() {
+				_, _ = bodyWriter.Write(make([]byte, 1024))
+			}()
+			request, err := http.NewRequestWithContext(ctx, http.MethodPost, httpServer.URL()+testCase.procedure, bodyReader)
+			assert.Nil(t, err)
+			request.Header.Set("Content-Type", testCase.contentType)
+			response, err := client.Do(request)
+			if err != nil {
+				t.Fatalf("Do: %v", err)
+			}
+			defer response.Body.Close()
+			assert.Equal(t, response.StatusCode, testCase.wantStatus)
+		})
+	}
+}

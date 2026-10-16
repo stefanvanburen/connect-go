@@ -789,6 +789,9 @@ func (hc *connectUnaryHandlerConn) Close(err error) error {
 		_ = hc.request.Body.Close()
 		return writeErr
 	}
+	// Send the error before closing the body, which over HTTP/1.1 reads up to
+	// 256 KiB of whatever the client hasn't sent yet.
+	flushResponseWriter(hc.responseWriter)
 	return hc.request.Body.Close()
 }
 
@@ -868,6 +871,10 @@ func (hc *connectStreamingHandlerConn) Close(err error) error {
 	// a well-intentioned client may just not expect the server to be returning
 	// an error for a streaming RPC. Better to accept that we can't always reuse
 	// TCP connections.
+	//
+	// Over HTTP/1.1, closing the body still reads up to 256 KiB of it, so send
+	// the end of the stream first.
+	flushResponseWriter(hc.responseWriter)
 	if err := hc.request.Body.Close(); err != nil {
 		if connectErr, ok := asError(err); ok {
 			return connectErr
